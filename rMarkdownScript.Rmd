@@ -1,0 +1,319 @@
+---
+title: "The impact of greenhouse gas emissions on future habitat suitability of the *Lynx Pardinus*"
+output: word_document
+mainfont: Arial 
+---
+
+# Materials & Methods
+
+All data processing and modelling was done in R and R Studio (v4.1.2, R Core Team 2021, RStudio Team, 2022).
+
+### Data Cleaning
+
+A data set of 1359 observations of L. pardinus was downloaded from the Global Biodiversity Information Facility using the R package dismo (GBIF Secretariat, 2022, Robert *et al.*, 2022). Observations that were missing one or both coordinates were removed, as missing coordinates cannot be processed. 
+
+```{r message=FALSE}
+library(dismo)
+data <- gbif("lynx", "pardinus")
+data <- subset(data, lon != "NA" | lat != "NA")
+```
+
+Observations of preserved and fossil specimens, and observations before the year 2000, were discarded are not representative of current distribution. The data was checked for duplicates, of which there were none.
+
+```{r}
+data <- subset(data, basisOfRecord != "PRESERVED_SPECIMEN" & 
+                 basisOfRecord != "FOSSIL_SPECIMEN" & year >= 2000)
+sum(duplicated(data))
+```
+
+The data was then processed using the CoordinateCleaner package to identify outliers, plain zeros, equal latitude/longitude, ocean coordinates and urban occurrences, since these are unlikely to be correct or genuine observations of wild *L. pardinus* (Zizka *et al.*, 2019, Arel-Bundock *et al*., 2018).
+
+```{r message=FALSE}
+library(CoordinateCleaner)
+library(countrycode)
+data$ISO3 <- countrycode(data$ISO2, origin = "iso2c", destination = "iso3c")
+flags <- clean_coordinates(data, lon = "lon", lat = "lat", countries = "ISO3",
+                           tests = c("outliers", "urban", "seas", "zeros", 
+                                     "equal"))
+
+```
+
+```{r echo=FALSE, results='asis'}
+library(knitr)
+kable(summary(flags), caption ="[Table 1.]{.underline} Frequency table of flagged coordinates. The types of erroneous coordinates are invalid values (.val), unequal absolute latitude and longitude (.equ), plain zeroes (.zer), sea coordinates (.sea), urban area coordinates (.urb) and outliers (.otl).")
+```
+
+4 coordinates that were flagged as incorrect: 2 coordinates were in the ocean, and 2 were in urban areas (Figure 1). Inland coordinates appear appropriately flagged as urban areas, since these locations correspond to 2 large cities in Spain: Seville & Granada. *L. pardinus* does not inhabit cities, so these coordinates were removed. 
+
+``` {r echo=FALSE, fig.cap="[Figure 1.]{.underline} Coordinates of L. pardinus observations plotted on a map of the Iberian Peninsula & Northern Africa. Coordinates in black represent flagged coordinates. Axes are in WGS 84 degree coordinates."}
+plot(flags, lon = "lon", lat = "lat")
+```
+
+```{r results='asis', echo = FALSE}
+kable(data[!flags$.sea, c("lon","lat")], caption = "[Table 2.]{.underline} Flagged ocean coordinates. Row names correspond to row number of flagged observation.")
+```
+
+The two ocean coordinates are likely represented by the most southwestern flagged coordinate in Figure 1. as they share similar coordinates. These observations were removed as the correct locations of these occurrences was unclear. 
+
+```{r}
+locs <- data[flags$.summary,]
+```
+
+The data was converted into spatial format and projected into the transverse Mercator projection (UTM) zone 29N of the European datum (ED50) using the sf package (Pebesma, 2018). Location accuracy is between 1-9m, which is sufficient for this project.
+```{r message = FALSE}
+library(sf)
+locs_WGS84 <- st_as_sf(locs, coords = c("lon","lat"), crs = 4326)
+locs <- st_transform(locs_WGS84, crs = 23029)
+```
+
+
+```{r message = FALSE, fig.cap= "[Figure 2.]{.underline} A map of the Iberian Peninsula showing coordinates of documented observations of L. pardinus (red). Axes are given in Westing and Northing WGS 84 degree coordinates", fig.height=5}
+library(maptools)
+data("wrld_simpl")
+bbox_WGS84 <- st_bbox(locs_WGS84)
+bbox_WGS84[1:2] <- bbox_WGS84[1:2] - 1
+bbox_WGS84[3:4] <- bbox_WGS84[3:4] + 1
+plot(wrld_simpl, col = "lightyellow", xlim= bbox_WGS84[c(1,3)], 
+     ylim=bbox_WGS84[c(2,4)], axes = T, 
+     main ="Documented occurences of L. pardinus", 
+     xlab= "WGS 84 Westing coordinates", 
+     ylab = "WGS 84 Northing coordinates")
+plot(st_geometry(locs_WGS84), add = T, bg = "red", pch = 21, cex = 1.5)
+```
+
+### Bioclimatic models 
+
+Climatic models were downloaded using the geodata package (Hijmans, Ghosh & Mandel, 2022). The WorldClim2 model was used as the current climate model (Fick & Hijmans, 2017). The Hadley GEM3 atmospheric model was used for future climate modeling, as it is easily accessible and provides realistic climate simulations of Europe (Vautard *et al.*, 2018).The time period 2061-2080, and shared socioeconomic pathways (SSP) SSP1-2.6 (net zero by 2075) and SSP5-8.5 (emissions triple by 2075) were used for projected future climate models (Meinshausen *et al.*, 2020). A resolution of 2.5 arc minutes was used, providing an accuracy of approximately 5km$^{2}$ - finer resolutions had impractical processing speeds. Climatic models were cropped to an extent covering the entirety of the Iberian Peninsula, as to encapsulate historical ranges of *L. pardinus*. 
+
+```{r message = FALSE}
+library(geodata)
+bioclim_hist <- worldclim_global("bio", res = 2.5, path = "data")
+rast_template_UTM29 <- rast(ext(400000, 1600000, 4000000, 4900000), 
+                            crs = "EPSG:23029", res = 16000)
+hist_local <- project(bioclim_hist, rast_template_UTM29)
+future_126 <- cmip6_world(var = "bio", res = 2.5, ssp = 126, 
+                          model = "HadGEM3-GC31-LL", path = "data",
+                          time = "2061-2080")
+future_126 <- project(future_126, rast_template_UTM29)
+future_585 <- cmip6_world(var = "bio", res = "10", ssp = 585, 
+                          model = "HadGEM3-GC31-LL", path = "data",
+                          time = "2061-2080")
+future_585 <- project(future_585, rast_template_UTM29)
+```
+
+```{r echo = FALSE, fig.cap="[Figure 3.]{.underline} Temperature maps of the Iberian Peninsula currently (top-left), projected 2061-2080 map under low emissions scenario SSP1-2.6 (top-right) and under high emissions scenario SSP5-8.5 (bottom-left). Axes are in ED50/UTM 29N Westing and Northing coordinates.", fig.width= 8}
+breaks <- seq(0,30, by=2)
+cols <- hcl.colors(length(breaks)-1, palette = "Blue-Red2")
+par(mfrow = c(2,2))
+plot(hist_local[[1]], breaks = breaks, col = cols, type = "continuous",
+     main = "Current temperature map of Iberian Peninsula", cex.axis = "0.5")
+mtext("UTM Northing coordinates (m)", side = 2, line = 1.5, cex = 0.5)
+mtext("UTM Westing coordinates (m)", side = 1, line = 1.5, cex = 0.5)
+mtext("Temperature (Celsius degrees)", side = 4, line = 3, cex = 0.5)
+#plot(st_geometry(locs), add = T, bg = "red", pch = 21)
+plot(future_126[[1]], breaks = breaks, col = cols, type = "continuous",
+     main = "SSP1-2.6 Projected temperature map (2061-2080)")
+mtext("UTM Northing coordinates (m)", side = 2, line = 1.5, cex = 0.5)
+mtext("UTM Westing coordinates (m)", side = 1, line = 1.5, cex = 0.5)
+mtext("Temperature (Celsius degrees)", side = 4, line = 3, cex = 0.5)
+plot(future_585[[1]], breaks = breaks, col = cols, type = "continuous",
+     main = "SSP5-8.5 Projected temperature map (2061-2080)")
+mtext("UTM Northing coordinates (m)", side = 2, line = 1.5, cex = 0.5)
+mtext("UTM Westing coordinates (m)", side = 1, line = 1.5, cex = 0.5)
+mtext("Temperature (Celsius degrees)", side = 4, line = 3, cex = 0.5)
+```
+
+Although multicollinearity doesn't affect model reliability as a whole, predictive power of individual variables are not distinguishable, so clustering was used to reduce the set of variables to the least correlated set (Dormann *et al.*, 2012). 
+
+```{r fig.cap="[Figure 4.]{.underline} Cluster dendogram of bioclimatic variables in historical bioclimatic model. Closely correlated variables are clustered and identified with the red rectangles."}
+names(hist_local) <- paste0('bio', 1:19)
+clust_data <- values(hist_local)
+clust_data <- na.omit(clust_data)
+clust_data <- scale(clust_data)
+clust_data <- t(clust_data)
+
+clust_dist <- dist(clust_data)
+clust_output <- hclust(clust_dist)
+plot(clust_output, ylab="", axes = F)
+
+rect.hclust(clust_output, k = 5)
+```
+
+One variable from each cluster was selected from the cluster dendrogram, based on generality: annual precipitation (bio12), mean diurnal range (bio2), mean temperature of wettest and driest quarter (bio8 and bio9 respectively), and annual temperature (bio1). 
+ 
+```{r}
+hist_local <- hist_local[[c(1,2,8,9,12)]]
+names(hist_local) <- c("Annual_mean_temp", "Mean_diurnal_range", 
+                       "Mean_temp_wettest_quarter", "Mean_temp_driest_quarter",
+                       "Annual_Precip")
+future_126_Cl <- future_126[[c(1,2,8,9,12)]]
+names(future_126_Cl) <- names(hist_local)
+future_585_Cl <- future_585[[c(1,2,8,9,12)]]
+names(future_585_Cl) <- names(hist_local)
+```
+
+### Absence data
+Most species distribution models (SDM) require presence/absence data to generate predictive statistics (Brotons *et al.*, 2004). As true absence data is difficult to obtain, pseudo-absence data is often generated instead (Barbet-Massin *et al.*, 2012). Randomly generated pseudo-absence points and a 1:1 ratio of presence/absence data were used, as this has been documented to produce the most accurate model when using regression methods (Barbet-Massin *et al.*, 2012). 
+
+```{r}
+land <- hist_local[[1]] >= 0
+pseudo_absence <- randomPoints(mask = as(land, "Raster"), n = nrow(locs), 
+                            p = st_coordinates(locs))
+pseudo_absence <- st_as_sf(data.frame(pseudo_absence), coords = c("x","y"),
+                         crs = 23029)
+
+```
+
+```{r echo = FALSE, fig.cap="[Figure 5.]{.underline} Map of presence (red) and absence (dark blue) points for L. Pardinus on the Iberian Peninsula. Axes are in ED50/UTM 29N Westing and Northing coordinates."}
+plot(hist_local[[1]], col = "grey", legend = F)
+plot(st_geometry(pseudo_absence), add = TRUE, pch = 21, bg = "darkblue") 
+plot(st_geometry(locs), add = TRUE, bg = "red", pch = 21)
+mtext("UTM Northing coordinates (m)", side = 2, line = 1.5)
+mtext("UTM Westing coordinates (m)", side = 1, line = 1.5)
+```
+
+### Testing and training datasets 
+The data was partitioned using the standard 20:80 split for testing and training sets, retaining 20% of the data for model testing (Gholamy *et al.*, 2018). 
+``` {r}
+locs$kfold <- kfold(locs, k = 5)
+pseudo_absence$kfold <- kfold(pseudo_absence, k = 5)
+present <- subset(locs, select = "kfold")
+present$pa <- 1  
+pseudo_absence$pa <- 0  
+names(pseudo_absence) <- c("geometry", "kfold", "pa")
+st_geometry(pseudo_absence) <- "geometry"
+pa_data <- rbind(present, pseudo_absence)
+rownames(pa_data) <- 1:nrow(pa_data)
+envt_data <- extract(hist_local, pa_data)
+pa_data <- cbind(pa_data, envt_data)
+```
+
+## Species distribution modelling
+
+A generalised linear model (GLM) was used for SDM, as GLMs allow non-constant and non-normal distributions across variables, which is common for SDM data (Guisan, Edwards & Hastie, 2002). A binomial logistic regression was used to predict the probability of the presence or absence of *L. pardinus* in a geographical space (Hosmer & Lemeshow, 2000). 
+
+``` {r}
+glm_model <- glm(as.factor(pa) ~ Annual_mean_temp + Mean_diurnal_range
+                 + Mean_temp_wettest_quarter + Mean_temp_driest_quarter + Annual_Precip,
+                 data=pa_data, family = binomial(link="logit"), subset = kfold != 1)
+summary(glm_model)
+```
+Residual deviance decreased compared to the null model, suggesting that model fit was higher with the predictor variables than without. The GLM of the current climate model showed that mean diurnal range, and the mean temperature of the wettest and driest quarter had a statistically significant effect on the probability of *L. pardinus* being present in an area. The mean temperature of the driest quarter had the largest impact species presence, increasing log-odds of *L. pardinus* presence by 1.31 for every 1$^\circ$C increase. Mean diurnal range and mean temperature of the driest quarter had negative effects on species' presence, decreasing log-odds by 0.055 and 0.53 for every 1$^\circ$C increase respectively. Annual mean temperature and precipitation had no statistically significant effect on *L. pardinus* presence. 
+
+### GLM predictions and evaluation
+
+A prediction layer was created from the GLM and evaluated using the withheld testing data set. The area under the receiver operating characteristic (ROC) curve (AUC) value was 0.81, indicating a highly accurate predictive power (Hosmer & Lemeshow, 2000). The kappa statistic was used for model evaluation, and to determine the threshold for model transformation, as this approach has good accuracy for threshold optimisation in change detection models (Vasquez-Jimenez *et al.*, 2018). The maximum Kappa across was over 0.6, suggesting substantial inter-rater reliability (McHugh, 2012). The threshold value at maximum kappa was approximately -0.62 (Figure 6).
+
+```{r}
+glm_pred <- predict(hist_local, glm_model, type = "response")
+test_present <- st_coordinates(subset(pa_data, pa == 1 & kfold == 1))
+test_absent <- st_coordinates(subset(pa_data, pa == 0 & kfold == 1))
+glm_eval <- evaluate(p=test_present, a=test_absent, glm_model, x=hist_local)
+glm_eval
+max_kappa <- plogis(threshold(glm_eval, stat="kappa")) 
+```
+
+``` {r echo = FALSE, fig.cap="[Figure 6.]{.underline} ROC curve graph (left) and kappa-threshold plot (right). The AUC is drawn in red on the ROC graph, with a value of 0.81. In the kappa-threshold plot the kappa statistic is given at the y-axis, and threshold values on the x-axis. The maximum kappa value was at a threshold point of -0.62, indicated by the blue dotted line."}
+par(mfrow=c(1,2))
+plot(glm_eval, 'ROC', type='l')
+plot(glm_eval, 'kappa', type='l')
+abline(v=max_kappa -1 , lty=2, col='blue')
+```
+
+The GLM was used on the future climate models to generate predicted species distribution maps under the 2 future climate scenarios. The prediction layers were modified to only retain values above the maximum kappa threshold. 
+
+``` {r}
+fut126_glm <- predict(future_126_Cl, glm_model, type="response")
+fut585_glm <- predict(future_585_Cl, glm_model, type="response")
+glm_map <- glm_pred >= max_kappa
+fut126_glm <- fut126_glm >= max_kappa
+fut585_glm <- fut585_glm >= max_kappa
+```
+
+``` {r echo = FALSE, fig.cap="[Figure 7.]{.underline} Species distribution maps of the current time period (top left), under the low emissions (SSP1-2.6) scenario in the years 2061-2080 (top right), and under the very high emissions scenario (SSP5-8.5) in 2061-2080. Suitable habitated range is shown in red. Coordinates given in ED50/UTM29 Westing and Northing coordinates.", fig.width = 8}
+par(mfrow = c(2,2))
+plot(glm_map, col = c("grey", "red"), main = "Current suitable habitat for 
+     Lynx Pardinus", legend = F)
+mtext("UTM Northing coordinates (m)", side = 2, line = 1.5, cex = 0.6)
+mtext("UTM Westing coordinates (m)", side = 1, line = 1.2, cex = 0.6)
+plot(fut126_glm, col = c("grey","red"), main = "SDM of L. Pardinus under scenario 
+     SSP1-2.6 (2061-2080)", legend = F)
+mtext("UTM Northing coordinates (m)", side = 2, line = 1.5, cex = 0.6)
+mtext("UTM Westing coordinates (m)", side = 1, line = 1.2, cex = 0.6)
+plot(fut585_glm, col = c("grey","red"), main = "SDM of L. Pardinus under scenario 
+     SSP5-8.5 (2061-2080)", legend = F)
+mtext("UTM Northing coordinates (m)", side = 2, line = 1.5, cex = 0.6)
+mtext("UTM Westing coordinates (m)", side = 1, line = 1.2, cex = 0.6)
+```
+
+Suitable habitat range for *L. pardinus* increased dramatically under both future climate scenarios, with the very high emissions scenario having an even greater expansion (Figure 7). Though this appears surprising, the GLM model showed that the mean temperature of the driest quarter increased probability of *L. pardinus* presence. While other climatic variables, like mean diurnal range, had a negative impact on probability of species presence, mean temperature of the driest quarter had the largest effect on presence. Global warming is estimated to increase by 1.8$^\circ$C under SSP1-2.6, and 4.4$^\circ$C under SSP5-8.5, which explains why higher GHG emissions increases suitable habitat range for *L. pardinus* (Meinshausen *et al.*, 2020). 
+
+## Population Density
+Population density data for the year 2020 was obtained from the Gridded Population of the world, cropped, and projected to the ED50/UTM 29N coordinate system (CIESIN, 2016).
+
+``` {r message = F}
+pop_dens <- population(year = 2020, res = 2.5, path = "data")
+pop_dens <- project(pop_dens, rast_template_UTM29)
+```
+
+``` {r echo = F, fig.cap="[Figure 8.]{.underline} Heat map of population density across Iberian Peninsula. Legend in logarithmic values of population density. Axes in ED 50/UTM 29N coordinates."}
+plot(log10(pop_dens), col = hcl.colors(20,"Inferno"))
+mtext("UTM Northing coordinates (m)", side = 2, line = 1.5, cex = 0.6)
+mtext("UTM Westing coordinates (m)", side = 1, line = 1.2, cex = 0.6)
+```
+
+The species distribution maps were overlayed with the population density data to obtain population density per km$^{2}$ in areas covered by the species distribution. Population density was 
+
+```{r message=F}
+df_pop_species <- data.frame(Scenario = character(), pop_dens = numeric())
+pop_species_current <- pop_dens[glm_map]
+pop_species_current <- na.omit(pop_species_current)
+pop_species_current <- data.frame(Scenario = "Current", 
+                                  pop_dens = pop_species_current)
+df_pop_species <- rbind(df_pop_species, pop_species_current)
+
+pop_species_126 <- pop_dens[fut126_glm]
+pop_species_126 <- na.omit(pop_species_126)
+pop_species_126 <- data.frame(Scenario = "SSP126", pop_dens = pop_species_126)
+df_pop_species <- rbind(df_pop_species, pop_species_126)
+
+pop_species_585 <- pop_dens[fut585_glm]
+pop_species_585 <- na.omit(pop_species_585)
+pop_species_585 <- data.frame(Scenario = "SSP585", pop_dens = pop_species_585)
+df_pop_species <- rbind(df_pop_species, pop_species_585)
+```
+
+
+# Analysis & Results
+
+```{r}
+lm_pop <- lm(log10(pop_dens)~as.factor(Scenario), df_pop_species)
+summary(lm_pop)
+```
+
+```{r}
+par(mfrow = c(2,2))
+plot(lm_pop)
+```
+
+```{r}
+library(ggplot2)
+mean_current <- 10^1.63613 
+mean_126 <- 10^(1.63613  - 0.04603)
+mean_585 <- 10^(1.63613  - 0.12378)
+mean_pop_all <- c(mean_current, mean_126, mean_585)
+
+se_current <- 10^0.59
+se_126 <-  10^0.02526 
+se_585 <-0.02417
+se_pop_all <- c(se_current, se_126, se_585)
+
+scenarios = c("Current", "SSP1-2.6", "SSP5-8.5")
+table_lm_pop = data.frame(Scenario = scenarios, Mean = mean_pop_all, Std_Err = se_pop_all)
+
+ggplot(table_lm_pop, aes(x = Scenario, y = Mean, fill = Scenario)) + 
+  geom_bar(stat="identity") +
+  geom_errorbar(aes(ymin = Mean - Std_Err, ymax = Mean + Std_Err), width = 0.3)
+```
+
+# References
